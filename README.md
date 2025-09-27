@@ -1,3 +1,5 @@
+<img src="./resfit-fig2.png" width="400px"></img>
+
 ## ResFit - Pytorch (wip)
 
 Implementation of [ResFit, Residual Off-Policy RL for Finetuning Behavior Cloning Policies](https://residual-offpolicy-rl.github.io/)
