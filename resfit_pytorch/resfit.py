@@ -1,8 +1,13 @@
+from copy import deepcopy
+
 import torch
-from torch.nn import Module, ModuleList
+from torch.nn import Module, ModuleList, Identity
 
 from ema_pytorch import EMA
-from x_mlps_pytorch.normed_mlp import create_mlp
+
+from x_mlps_pytorch.normed_mlp import MLP, create_mlp
+
+from einops import pack, unpack
 
 # functions
 
@@ -11,6 +16,27 @@ def exists(v):
 
 def default(v, d):
     return v if exists(v) else d
+
+# td3
+
+class Agent(Module):
+    def __init__(
+        self,
+        actor: ResFitFinetuneWrapper,
+        critic: MLP,
+        actor_ema_decay = 0.99,
+        critic_ema_decay = 0.99
+    ):
+        super().__init__()
+
+        self.actor = actor
+
+        self.critic1 = critic
+        self.critic2 = deepcopy(critic)
+
+        self.actor_ema = EMA(self.actor, beta = actor_ema_decay)
+        self.critic1_ema = EMA(self.critic1, beta = critic_ema_decay)
+        self.critic2_ema = EMA(self.critic2, beta = critic_ema_decay)
 
 # classes
 
@@ -29,7 +55,8 @@ class ResFitFinetuneWrapper(Module):
         self.residual_action_mlp = create_mlp(
             dim_in = dim_action + dim_states,
             dim_out = dim_action,
-            depth = mlp_depth
+            depth = mlp_depth,
+            norm_fn = Identity
         )
 
     def parameters(self):
@@ -45,6 +72,15 @@ class ResFitFinetuneWrapper(Module):
             actions = self.base_model(states)
 
         mlp_input = torch.cat((states, actions), dim = -1)
+
+        is_chunked_actions = mlp_input.ndim == 3 # (batch, time, dim)
+
+        if is_chunked_actions:
+            mlp_input, packed_batch_time = pack([mlp_input], '* d')
+
         residual_actions = self.residual_action_mlp(mlp_input)
+
+        if is_chunked_actions:
+            residual_actions, = unpack(residual_actions, packed_batch_time, '* d')
 
         return actions + residual_actions
