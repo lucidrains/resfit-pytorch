@@ -19,7 +19,7 @@ def default(v, d):
     return v if exists(v) else d
 
 # critic ensembling
-# dealing with the notorious Q overestimation bias, they use an ensembling technique from another paper - train with subset chosen from a population, then actor is optimized with all of the ensemble
+# dealing with the notorious Q overestimation bias, they use an ensembling technique from another paper - train with subset chosen from ensemble, then actor is optimized with all of the ensemble
 # https://arxiv.org/abs/2101.05982
 
 class Ensemble(Module):
