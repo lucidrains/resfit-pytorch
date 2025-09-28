@@ -18,24 +18,6 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
-# td3
-
-class Agent(Module):
-    def __init__(
-        self,
-        actor: ResFitFinetuneWrapper,
-        critic: MLP,
-        actor_ema_decay = 0.99,
-        critic_ema_decay = 0.99
-    ):
-        super().__init__()
-
-        self.actor = actor
-        self.critic = critic
-
-        self.actor_ema = EMA(self.actor, beta = actor_ema_decay)
-        self.critic_ema = EMA(self.critic, beta = critic_ema_decay)
-
 # critic ensembling
 # dealing with the notorious Q overestimation bias, they use an ensembling technique from another paper - train with subset chosen from a population, then actor is optimized with all of the ensemble
 # https://arxiv.org/abs/2101.05982
@@ -49,6 +31,7 @@ class Ensemble(Module):
     ):
         super().__init__()
         self.net = net
+        self.ensemble_size = ensemble_size
 
         params = dict(net.named_parameters())
         device = next(iter(params.values())).device
@@ -77,15 +60,15 @@ class Ensemble(Module):
         ids = None,
     ):
 
-        ensemble = self.ensemble_params
+        params = self.ensemble_params
 
         if exists(ids):
             # if `ids` passed in, will forward for only that subset of network
-            assert (ids < self.pop_size).all()
+            assert (ids < self.ensemble_size).all()
 
-            ensemble_params = {key: param[ids] for key, param in pop_params.items()}
+            params = {key: param[ids] for key, param in params.items()}
 
-        return self.ensemble_forward(dict(ensemble_params), data)
+        return self.ensemble_forward(dict(params), data)
 
 # classes
 
@@ -133,3 +116,21 @@ class ResFitFinetuneWrapper(Module):
             residual_actions, = unpack(residual_actions, packed_batch_time, '* d')
 
         return actions + residual_actions
+
+# td3
+
+class Agent(Module):
+    def __init__(
+        self,
+        actor: ResFitFinetuneWrapper,
+        critic: MLP,
+        actor_ema_decay = 0.99,
+        critic_ema_decay = 0.99
+    ):
+        super().__init__()
+
+        self.actor = actor
+        self.critic = critic
+
+        self.actor_ema = EMA(self.actor, beta = actor_ema_decay)
+        self.critic_ema = EMA(self.critic, beta = critic_ema_decay)
