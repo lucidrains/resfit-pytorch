@@ -1,5 +1,10 @@
 import torch
+from torch import tensor
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+
 from torch.nn import Module, Identity
+from torch.optim import Adam
 
 from ema_pytorch import EMA
 
@@ -15,6 +20,14 @@ def exists(v):
 
 def default(v, d):
     return v if exists(v) else d
+
+def divisible_by(num, den):
+    return (num % den) == 0
+
+# tensor helpers
+
+def choice(num, k):
+    return torch.randperm(num)[:k]
 
 # classes
 
@@ -70,8 +83,15 @@ class Agent(Module):
         self,
         actor: ResFitFinetuneWrapper,
         critic: MLP,
+        num_critics = 10,
+        num_critics_for_update = 2,
+        num_critic_update_to_actor = 2, # delayed update of the actor - every N critic updates, update the actor
         actor_ema_decay = 0.99,
-        critic_ema_decay = 0.99
+        critics_ema_decay = 0.99,
+        discount_factor = 0.99,
+        optim_klass = Adam,
+        optim_kwargs: dict = dict(),
+        learning_rate = 3e-4
     ):
         super().__init__()
 
@@ -81,7 +101,86 @@ class Agent(Module):
         # dealing with the notorious Q overestimation bias, they use an ensembling technique from another paper - train with subset chosen from a population, then actor is optimized with all of the ensemble
         # https://arxiv.org/abs/2101.05982
 
-        self.critic = Ensemble(critic)
+        self.critics = Ensemble(critic, num_critics)
+
+        self.num_critics = num_critics
+        self.num_critics_for_update = num_critics_for_update # the subselection of critics for learning of the critic
+        self.num_critic_update_to_actor = num_critic_update_to_actor
+
+        # exponential smoothing
 
         self.actor_ema = EMA(self.actor, beta = actor_ema_decay)
-        self.critic_ema = EMA(self.critic, beta = critic_ema_decay)
+        self.critics_ema = EMA(self.critic, beta = critic_ema_decay)
+
+        # optimizers
+
+        self.actor_optim = optim_klass(self.actor.parameters(), lr = learning_rate)
+        self.critics_optim = optim_klass(self.critics.parameters(), lr = learning_rate)
+
+        # step - for keeping track of when actors update
+
+        self.register_buffer('step', tensor(1))
+
+    def train_step(
+        self,
+        state,
+        actions,
+        rewards,
+        next_state,
+        next_actions,
+        terminal
+    ):
+        step = self.step.item()
+        self.step.add_(1)
+
+        # update critic
+
+        critic_indices = choice(self.num_critics, self.num_critics_for_update)
+
+        pred_q_value = self.critics(state, actions, ids = critic_indices)
+
+        next_q_value = self.critics_ema(next_state, next_actions, ids = critic_indices)
+
+        # bandaid over the overestimation issue
+        # take minimum of Q value
+
+        pred_q_value, next_q_value = tuple(reduce(t, 'critics ... -> ...', 'min') for t in (pred_q_value, next_q_value))
+
+        # bellman's
+
+        target_q_value = rewards * (~terminal).float() * self.discount_factor * next_q_value
+
+        critics_loss = F.mse_loss(pred_q_value, target_q_value)
+
+        critics_loss.backward()
+
+        self.critics_optim.step()
+        self.critics_optim.zero_grad()
+
+        self.critics_ema.update()
+
+        # early return if actor is not to be updated
+
+        if not divisible_by(step, self.num_critic_update_to_actor):
+            return
+
+        # actor is updated on all of the critics, not a subset
+
+        action = self.actor(state)
+
+        q_value = self.critics_ema.forward_eval(state, action)
+
+        # gradient ascent
+
+        (-q_value).mean().backward()
+
+        self.actor_optim.step()
+        self.actor_optim.zero_grad()
+
+        self.actor_ema.update()
+
+    def forward(
+        self,
+        dataset: Dataset
+    ):
+        raise NotImplementedError
