@@ -1,14 +1,12 @@
-from copy import deepcopy
-
 import torch
-from torch.nn import Module, ModuleList, Identity, ParameterList
-from torch.func import vmap, functional_call
+from torch.nn import Module, Identity
 
 from ema_pytorch import EMA
 
+from x_mlps_pytorch.ensemble import Ensemble
 from x_mlps_pytorch.normed_mlp import MLP, create_mlp
 
-from einops import pack, unpack
+from einops import pack, unpack, einsum
 
 # functions
 
@@ -17,58 +15,6 @@ def exists(v):
 
 def default(v, d):
     return v if exists(v) else d
-
-# critic ensembling
-# dealing with the notorious Q overestimation bias, they use an ensembling technique from another paper - train with subset chosen from ensemble, then actor is optimized with all of the ensemble
-# https://arxiv.org/abs/2101.05982
-
-class Ensemble(Module):
-    def __init__(
-        self,
-        net: Module,
-        ensemble_size,
-        init_std_dev = 2e-2
-    ):
-        super().__init__()
-        self.net = net
-        self.ensemble_size = ensemble_size
-
-        params = dict(net.named_parameters())
-        device = next(iter(params.values())).device
-
-        ensemble_params = {name: (torch.randn((ensemble_size, *param.shape), device = device) * init_std_dev).requires_grad_() for name, param in params.items()}
-
-        self.param_names = ensemble_params.keys()
-        self.param_values = ParameterList(list(ensemble_params.values()))
-
-        def _forward(params, data):
-            return functional_call(net, params, data)
-
-        self.ensemble_forward = vmap(_forward, in_dims = (0, None))
-
-    @property
-    def ensemble_params(self):
-        return dict(zip(self.param_names, self.param_values))
-
-    def parameters(self):
-        return self.ensemble_params.values()
-
-    def forward(
-        self,
-        data,
-        *,
-        ids = None,
-    ):
-
-        params = self.ensemble_params
-
-        if exists(ids):
-            # if `ids` passed in, will forward for only that subset of network
-            assert (ids < self.ensemble_size).all()
-
-            params = {key: param[ids] for key, param in params.items()}
-
-        return self.ensemble_forward(dict(params), data)
 
 # classes
 
@@ -130,7 +76,12 @@ class Agent(Module):
         super().__init__()
 
         self.actor = actor
-        self.critic = critic
+
+        # critic ensembling
+        # dealing with the notorious Q overestimation bias, they use an ensembling technique from another paper - train with subset chosen from a population, then actor is optimized with all of the ensemble
+        # https://arxiv.org/abs/2101.05982
+
+        self.critic = Ensemble(critic)
 
         self.actor_ema = EMA(self.actor, beta = actor_ema_decay)
         self.critic_ema = EMA(self.critic, beta = critic_ema_decay)
